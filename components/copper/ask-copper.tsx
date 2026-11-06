@@ -9,6 +9,7 @@ import {
   ArrowRightIcon,
   ArrowUpIcon,
   BrainIcon,
+  FileTextIcon,
   MessageCircleIcon,
   TriangleAlertIcon,
   WrenchIcon,
@@ -34,6 +35,7 @@ import {
   TOOL_LABELS,
 } from "@/lib/copper/assistant/progress";
 import { formatUsd, getPlans, getProducts } from "@/lib/copper/catalog";
+import { citedSources, parseCitations } from "@/lib/copper/docs/citations";
 import { cn } from "@/lib/utils";
 
 const STARTERS = [
@@ -148,7 +150,7 @@ export function AskCopper({ aiConfigured }: { aiConfigured: boolean }) {
                   Ask Copper
                 </SheetTitle>
                 <SheetDescription className="text-xs text-white/70">
-                  Prices, totals and stock, checked with tools.
+                  Prices, stock and support docs, checked with tools.
                 </SheetDescription>
               </div>
               <SheetClose asChild>
@@ -225,7 +227,7 @@ export function AskCopper({ aiConfigured }: { aiConfigured: boolean }) {
                   aria-label="Your question"
                   value={draft}
                   onChange={(event) => setDraft(event.target.value)}
-                  placeholder="Ask about prices or stock…"
+                  placeholder="Ask about prices, stock or setup…"
                   className="bg-background focus-visible:ring-ring h-10 flex-1 rounded-full border px-4 text-sm outline-none focus-visible:ring-2"
                 />
                 <Button
@@ -383,13 +385,67 @@ function Answer({
             </div>
           )}
           <p className="text-sm whitespace-pre-wrap">
-            {reply}
+            <CitedReply reply={reply} />
             {working && (
               <span className="bg-primary ml-0.5 inline-block h-4 w-0.5 animate-pulse align-middle" />
             )}
           </p>
+          {!working && <ReplySources reply={reply} />}
         </div>
       )}
+    </div>
+  );
+}
+
+/** The reply, with each [Title, p. N] citation turned into a link to that page. */
+function CitedReply({ reply }: { reply: string }) {
+  return parseCitations(reply).map((part, i) =>
+    typeof part === "string" ? (
+      part
+    ) : part.url ? (
+      <a
+        key={i}
+        href={part.url}
+        target="_blank"
+        rel="noreferrer"
+        data-testid="citation"
+        className="text-primary bg-primary/10 rounded px-1 text-xs font-semibold whitespace-nowrap hover:underline"
+      >
+        {part.title}, p. {part.page}
+      </a>
+    ) : (
+      // A title that isn't one of our documents: show it, but don't link it.
+      <span key={i} className="text-muted-foreground text-xs">
+        {part.raw}
+      </span>
+    ),
+  );
+}
+
+/** Under the reply: every page it cites, once each. */
+function ReplySources({ reply }: { reply: string }) {
+  const sources = citedSources(reply);
+  if (sources.length === 0) return null;
+  return (
+    <div className="mt-3 border-t pt-2" data-testid="reply-sources">
+      <p className="text-muted-foreground mb-1 text-[10px] font-semibold tracking-widest uppercase">
+        {sources.length === 1 ? "Source" : "Sources"}
+      </p>
+      <ul className="space-y-1">
+        {sources.map((s) => (
+          <li key={s.url}>
+            <a
+              href={s.url!}
+              target="_blank"
+              rel="noreferrer"
+              className="text-primary inline-flex items-center gap-1 text-xs font-semibold hover:underline"
+            >
+              <FileTextIcon className="size-3 shrink-0" />
+              {s.title} · p. {s.page}
+            </a>
+          </li>
+        ))}
+      </ul>
     </div>
   );
 }
@@ -605,6 +661,40 @@ function ToolOutput({ name, output }: { name: string; output: any }) {
       </div>
     );
   }
+  if (name === "search_docs" && output?.results)
+    return (
+      <ol className="space-y-2 text-xs">
+        {output.results.map((r: any, i: number) => (
+          <li
+            key={`${r.url}-${i}`}
+            data-testid="doc-result"
+            className="bg-card rounded-lg border p-2"
+          >
+            <div className="flex items-baseline justify-between gap-2">
+              <a
+                href={r.url}
+                target="_blank"
+                rel="noreferrer"
+                className="text-primary inline-flex items-center gap-1 font-semibold hover:underline"
+              >
+                <FileTextIcon className="size-3 shrink-0" />
+                {r.title} · p. {r.page}
+              </a>
+              <span
+                className="text-muted-foreground shrink-0 font-mono"
+                title="How close in meaning to the question (0 to 1)"
+              >
+                {r.score.toFixed(2)}
+              </span>
+            </div>
+            {r.section && (
+              <p className="text-muted-foreground mt-0.5">{r.section}</p>
+            )}
+            <p className="mt-1 line-clamp-3">{r.text}</p>
+          </li>
+        ))}
+      </ol>
+    );
   // A tool without its own layout yet: show what came back as plain text.
   return (
     <pre className="max-h-48 overflow-auto text-xs whitespace-pre-wrap">

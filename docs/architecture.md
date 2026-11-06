@@ -96,3 +96,40 @@ each step. Module 3 teaches it to answer from the customer documents.
 | Instructions | `lib/copper/assistant/instructions.ts` | `COPPER_INSTRUCTIONS`. Copper says it can't help yet with warranty, setup, troubleshooting or privacy |
 | Data | `lib/copper/inventory.ts`, `lib/copper/documents.ts` | Stock from `lib/copper/data/inventory.json`; `DOCUMENTS`: the four customer documents and their PDF paths under `public/docs/`. The PDFs are added in class |
 | AI calls | `{ module: 2, feature: "ask-copper" }` | One streamed call per question |
+
+## Module 3: Ask Copper reads the docs
+
+**Summary:** Ask Copper answers setup, troubleshooting, warranty and policy
+questions from the four support PDFs, cites the page for every sentence, and
+says "I couldn't find that in our support docs" when they don't answer it.
+
+| Piece | Where | What it does |
+|---|---|---|
+| Documents | `public/docs/*.pdf` | The four customer PDFs (names in `lib/copper/documents.ts`), served at `/docs/<id>.pdf` so `#page=N` links open the right page |
+| Index build | `scripts/build-docs-index.mts` (`npm run docs:index`), `lib/copper/docs/pdf-text.ts`, `lib/copper/docs/passages.ts` | One-time step: reads each page, cuts it into passages of a few sentences that start with "Title, p. N, Section:", and embeds them. Run again when a PDF changes |
+| Index | `lib/copper/data/docs-index.json`, `lib/copper/docs/index.ts` | 72 passages with 768-number embeddings (~0.5 MB), imported once and kept in memory. No database |
+| Search | `lib/copper/docs/search.ts` | `searchDocs()`: embeds the question, scores every passage by cosine similarity and returns the top 5 with title, page, section and a PDF page link |
+| Tool | `lib/copper/assistant/tools.ts` | `search_docs`, the fifth tool. Its card lists the 5 passages as page links with their scores |
+| Citations | `lib/copper/docs/citations.ts`, `components/copper/ask-copper.tsx` | Turns `[Title, p. N]` in a reply into links, and lists the cited pages under the answer |
+| Instructions | `lib/copper/assistant/instructions.ts` | Answer only from `search_docs`, cite every sentence, never guess, `NOT_IN_DOCS` when the passages don't answer it |
+| AI calls | `{ module: 3, feature: "docs-index" }`, `{ module: 3, feature: "search-docs" }` | `callEmbedMany` / `callEmbed` in `lib/ai/call.ts` with `gemini-embedding-001` (768 dimensions, $0.15 per million tokens). Building the index is one batch call; each search embeds one question |
+
+**Data flow:** question → `askCopper` → model calls `search_docs` → question
+embedded → top 5 passages from the in-memory index → model writes a cited
+reply → panel links each citation to its PDF page.
+
+**Decisions and trade-offs:**
+
+- **In memory, not a vector database.** Four documents (32 pages) fit easily.
+  At thousands of documents this would move to pgvector in Supabase.
+- **Passages carry their title, page and section in their text,** so a passage
+  makes sense on its own both to the embedding model and to Copper.
+- **Questions and passages use different embedding task types**
+  (`RETRIEVAL_QUERY` / `RETRIEVAL_DOCUMENT`), which helps a question land near
+  its answer.
+- **`AI_MODEL=google/gemini-3-flash`:** Gemini 2.5 Flash, the default, isn't
+  available to new Google AI Studio keys.
+
+**Risks and open questions:** the free tier allows about 20 chat requests a
+day per model per Google project, and each answer uses 2–3. An exact lookup
+like "What is C-47?" would be cheaper and safer as a table query than RAG.

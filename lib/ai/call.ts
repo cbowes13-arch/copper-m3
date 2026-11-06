@@ -1,7 +1,13 @@
 import { createGoogleGenerativeAI } from "@ai-sdk/google";
-import { generateText, Output, streamText } from "ai";
+import { embed, embedMany, generateText, Output, streamText } from "ai";
 import type { z } from "zod";
-import { defaultModel, MODELS, type ModelId } from "@/lib/ai/models";
+import {
+  defaultModel,
+  EMBEDDING_MODEL,
+  type EmbeddingModelId,
+  MODELS,
+  type ModelId,
+} from "@/lib/ai/models";
 import { costUsd } from "@/lib/ai/pricing";
 
 // Every model call in the app goes through this file, so each one is logged
@@ -36,7 +42,7 @@ type TextOptions = DistributiveOmit<
 export type AiCallRow = {
   module: number;
   feature: string;
-  model: ModelId;
+  model: ModelId | EmbeddingModelId;
   input_tokens: number | null;
   output_tokens: number | null;
   cost_usd: number | null;
@@ -56,6 +62,14 @@ function languageModel(model: ModelId) {
   return createGoogleGenerativeAI({ apiKey: googleKey })(id);
 }
 
+function embeddingModel() {
+  const googleKey = process.env.GOOGLE_GENERATIVE_AI_API_KEY?.trim();
+  if (!googleKey) throw new AiNotConfiguredError();
+  return createGoogleGenerativeAI({ apiKey: googleKey }).embedding(
+    EMBEDDING_MODEL.googleId,
+  );
+}
+
 /** Prints one line per model call, so the cost and time are visible. */
 async function logCall(row: AiCallRow): Promise<void> {
   console.info("[ai_calls]", JSON.stringify(row));
@@ -64,7 +78,11 @@ async function logCall(row: AiCallRow): Promise<void> {
 type Usage = { inputTokens?: number; outputTokens?: number };
 
 /** Builds the ai_calls row for a call that started at `started`. */
-function rowFor(info: CallInfo, model: ModelId, started: number) {
+function rowFor(
+  info: CallInfo,
+  model: ModelId | EmbeddingModelId,
+  started: number,
+) {
   return (ok: boolean, usage?: Usage): AiCallRow => {
     const input = usage?.inputTokens ?? null;
     const output = usage?.outputTokens ?? null;
@@ -124,6 +142,75 @@ export async function callObject<Schema extends z.ZodType>(
   // Spreading `rest` loses generateText's output type; Output.object has
   // already validated it against `schema`, so restore the type here.
   return result as typeof result & { output: z.infer<Schema> };
+}
+
+/**
+ * What the text is for. Google embeds stored passages and search questions a
+ * little differently, which makes questions land closer to their answers.
+ */
+export type EmbedTask = "document" | "question";
+
+function embeddingOptions(task: EmbedTask) {
+  return {
+    google: {
+      outputDimensionality: EMBEDDING_MODEL.dimensions,
+      taskType: task === "document" ? "RETRIEVAL_DOCUMENT" : "RETRIEVAL_QUERY",
+    },
+  } as const;
+}
+
+/** Runs an embedding call and logs it to ai_calls like a text call. */
+async function trackedEmbedding<T extends { usage: { tokens: number } }>(
+  info: CallInfo,
+  run: () => Promise<T>,
+): Promise<T> {
+  const row = rowFor(info, EMBEDDING_MODEL.id, performance.now());
+  try {
+    const result = await run();
+    await logCall(
+      row(true, { inputTokens: result.usage.tokens, outputTokens: 0 }),
+    );
+    return result;
+  } catch (error) {
+    if (!(error instanceof AiNotConfiguredError)) await logCall(row(false));
+    throw error;
+  }
+}
+
+/**
+ * Turns many texts into embeddings in one go (used once, to build the docs
+ * index). Example: callEmbedMany({ module: 3, feature: "docs-index" }, texts, "document")
+ */
+export async function callEmbedMany(
+  info: Omit<CallInfo, "model">,
+  values: string[],
+  task: EmbedTask,
+): Promise<number[][]> {
+  const { embeddings } = await trackedEmbedding(info, () =>
+    embedMany({
+      model: embeddingModel(),
+      values,
+      providerOptions: embeddingOptions(task),
+      maxParallelCalls: 2,
+    }),
+  );
+  return embeddings;
+}
+
+/** Turns one text (usually a customer's question) into an embedding. */
+export async function callEmbed(
+  info: Omit<CallInfo, "model">,
+  value: string,
+  task: EmbedTask,
+): Promise<number[]> {
+  const { embedding } = await trackedEmbedding(info, () =>
+    embed({
+      model: embeddingModel(),
+      value,
+      providerOptions: embeddingOptions(task),
+    }),
+  );
+  return embedding;
 }
 
 type StreamOptions = DistributiveOmit<
